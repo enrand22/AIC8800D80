@@ -14,3 +14,9 @@ DefaultProduct=0x1111
 TargetVendor=0xa69c
 TargetProduct=0x8d80
 MessageContent="555342431234567800000000000010fd0000000000000000000000000000f2"
+
+# Some revisions (e.g. bcdDevice=10.01, SCSI "LGX WIFI6 2.30") accept the CDB
+# above (CSW status 0) but never re-enumerate with only MessageContent.
+# The Windows driver issues EjectUSB() + rescan right after this command, so
+# replicate that with ResetUSB=1.
+ResetUSB=1

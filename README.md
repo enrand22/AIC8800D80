@@ -334,6 +334,8 @@ sudo sg_raw /dev/sg0 fd 00 00 00 00 00 00 00 00 00 00 00 00 00 00 f2
 
 The device will disconnect and re-enumerate through the three stages described above.
 
+> **Note (some revisions only):** on units that report `bcdDevice=10.01` with SCSI vendor string `LGX WIFI6 2.30`, the CDB above is accepted (`CSW status 0`) but the device does **not** re-enumerate on its own. The Windows driver sends `EjectUSB()` + rescan immediately after this command, so the USB reset in the `usb_modeswitch` config (`ResetUSB=1`) is what completes the switch. If you use the manual `sg_raw` path and the device stays as `1111:1111`, force a port reset (`usbreset <dev>` or unplug/replug) after the command.
+
 **2. Bind the WiFi driver:**
 
 ```bash
