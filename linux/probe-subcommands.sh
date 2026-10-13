@@ -21,8 +21,11 @@ SUB_FROM="${1:-0xF0}"
 SUB_TO="${2:-0xFF}"
 USB_VID="${USB_VID:-1111}"
 USB_PID="${USB_PID:-1111}"
-OUT="${OUT:-$PWD/evidence}"
-ART="${ART:-$PWD/artifacts}"
+# Defaults live next to the script, not in $PWD: run with sudo from a home directory, a
+# $PWD-relative default would create ~/evidence and a root-owned ~/artifacts in the caller home.
+SELFDIR="$(cd -- "$(dirname -- "$(readlink -f "$0")")" && pwd)"
+OUT="${OUT:-$SELFDIR/evidence}"
+ART="${ART:-$SELFDIR/artifacts}"
 mkdir -p "$OUT" "$ART"
 LOG="$OUT/probe-subcommands-$(date +%Y%m%d-%H%M%S).log"
 
