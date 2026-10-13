@@ -83,7 +83,7 @@ On Linux, `usb_modeswitch` handles this pattern for many devices (mostly 3G/4G m
 FD 00 00 00 00 00 00 00 00 00 00 00 00 00 00 F2
 ```
 
-This command was discovered by reverse-engineering `Usb_Driver.dll` from the Windows driver package. See [docs/reverse-engineering-results.md](docs/reverse-engineering-results.md) for full details.
+This command was discovered by reverse-engineering `Usb_Driver.dll` from the Windows driver package. See [docs/reverse-engineering-results.md](docs/reverse-engineering-results.md) for full details. See [docs/protocol-notes.md](docs/protocol-notes.md) for an independent verification of that analysis on a second build of the DLL, the subcommand map of the vendor opcode, the vendor-vs-Linux firmware comparison, and the tooling to reproduce it (`linux/probe-subcommands.sh`).
 
 Additionally, the AIC8800D80 Linux driver is not included in the mainline kernel. You need an out-of-tree DKMS driver, and different packagers (Brostrend, Radxa, etc.) ship different configurations -- some with Bluetooth disabled. This project handles all of that automatically.
 
@@ -393,6 +393,7 @@ AIC8800D80/
 │   ├── reverse-engineering-results.md # Full RE findings
 │   ├── reverse-engineering-guide.md   # How to RE similar devices
 │   ├── bluetooth-support.md           # Detailed BT architecture and troubleshooting
+│   ├── protocol-notes.md              # Verified protocol + 0xFD subcommand map
 │   └── windows-driver-analysis.md     # Windows DLL/driver analysis
 └── windows/
     └── INF/
