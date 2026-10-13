@@ -5,7 +5,8 @@ pull request and issue comments from this work have not been answered yet
 (see `fix/resetusb-after-modeswitch`, PR #6: open and mergeable, no review).
 
 No vendor binary is redistributed here — only behaviour we observed, hashes, and our own tooling.
-Device: `1111:1111`, SCSI inquiry `LGX WIFI6 2.30`, `bcdDevice 10.01`. Host: Arch Linux, kernel 7.2.x.
+Device: ZeroCD `1111:1111`, SCSI inquiry `LGX WIFI6 2.30`, `bcdDevice 10.01`, 2 031 616-byte fake disk.
+Host: Arch Linux, kernel 7.2.x.
 
 ## 1. What was verified on a second build of `Usb_Driver.dll`
 
@@ -47,35 +48,42 @@ the export address table, which is not a call.
 
 ## 2. Subcommand map for the vendor SCSI opcode `0xFD`
 
-The device answers SCSI while it is still in ZeroCD mode. It enumerates as a **disk** (`/dev/sda`, model
-`WIFI6`, ~1.9 MB read-only vfat, label `WiFi-driver`), so its generic node is the one listed in
-`/sys/block/sda/device/scsi_generic/`. Sweep the last CDB byte with `sg_raw` in read-only mode:
+The device answers SCSI while it is still in ZeroCD mode. It enumerates as a **disk** (model `WIFI6`,
+~1.9 MB read-only vfat, label `WiFi-driver`), so its generic node is the one listed in
+`/sys/block/sdX/device/scsi_generic/`. Sweep the last CDB byte with `sg_raw` in read-only mode:
 
 ```bash
 sg_raw -R -t 10 -r 64 /dev/sg0 fd 00 00 00 00 00 00 00 00 00 00 00 00 00 00 <SUB>
 ```
 
-| sub | behaviour | answer |
-|---|---|---|
-| `F2` | the mode switch (trigger) | CSW OK; needs the USB reset afterwards on this revision |
-| `F3` (`GetHippo`) | **real data-IN command** | 17 bytes: `88M800 DISK\0` (`38 38 4d 38 30 30 20 44 49 53 4b 20 20 20 20 20 00`) |
-| `FB` | data-IN candidate | without a data phase: `Illegal Request / Invalid field in cdb`; with data-IN: `Good` and **0 bytes** |
-| `F0 F1 F4-FA FC-FF` | no effect | `SCSI Status: Good` and *no data received* — the stub acknowledges blindly whatever it does not implement |
+Complete sweep of `0x00`-`0xFF` on the `1111:1111` personality (the switch `F2` is deliberately kept out
+of the sweep and verified separately):
+
+| sub | behaviour |
+|---|---|
+| `F2` | the mode switch; on this revision it also needs the USB reset afterwards |
+| `F3` (`GetHippo`) | **data-IN**, 17 bytes: `88M800 DISK\0` (`38 38 4d 38 30 30 20 44 49 53 4b 20 20 20 20 20 00`) — the device reports its own identity/mode, and it honours the allocation length (`-r 5` returns only `88M80`) |
+| `0xE7` | **data-IN, exactly one byte `0xF8`** — reproducible, and identical on the second personality (section 4) |
+| `FB` | data-IN candidate: `Good` with **0 bytes** |
+| `0xEB` | `Check Condition` without a data phase, `Good` + no data with one |
+| `0xEC` | `Check Condition` with and without a data phase |
+| `0x0F`, `0xD2`-`0xD6`, `0xE5`, `0xE9` | **transport error** (`Host_status=0x07 [DID_ERROR]`, `sg_raw` exit 99) on both variants; the device recovers and the sweep continues |
+| `0xE4`, `0xED` | the command itself answers `Good`, and then the **fake disk detaches**: `/dev/sg*` disappears (`No such file or directory`) and TEST UNIT READY stops answering, while the USB device stays enumerated as `1111:1111` on the same port. Recovery is a power cycle |
+| everything else | `SCSI Status: Good` and *no data received* — the stub acknowledges blindly whatever it does not implement |
 
 Notes that save time if you repeat this:
-- The device honours the allocation length: `-r 5` returns only `88M80`. It reports its own
-  identity/mode in that string, ending in `DISK` while in ZeroCD mode.
 - **Do not use INQUIRY without a data phase as a liveness check on this stub** — it answers
   `Illegal Request / Invalid field in cdb` while perfectly healthy. Use `TEST UNIT READY`
   (`sg_raw -R <dev> 00 00 00 00 00 00`), and always pass `-r N` for data-IN commands.
-- No subcommand other than `F2` changed the device state: no re-enumeration, no lost response, no replug
-  needed across the sweep. Everything was issued with `-R` (read-only), so nothing was written.
-- Commands that have no meaning are not rejected — that is why a "it answered OK" test proves nothing
-  about whether a command exists.
-
-Tooling: `linux/probe-subcommands.sh` (this fork) runs the sweep, writes a log with the raw
-`sg_raw -v` output and the USB ID state before/after every probe, stops on the first unresponsive probe
-and prints the subcommand to resume from after a replug.
+- A "Good" answer proves nothing about whether a subcommand exists: unimplemented ones are accepted the
+  same way. Only the exceptions above (data returned, Check Condition, transport error, detach) carry
+  information.
+- Nothing changes the USB identity, so a sweep does not need a replug for the identity's sake — but the
+  detaching subcommands do (see the tool's abort/resume behaviour below).
+- Tooling: `linux/probe-subcommands.sh` runs the sweep, resolves the device **by USB ID** (never by drive
+  letter), records the USB + SCSI identity and the state before/after every probe, timestamps the raw
+  fake-disk image, aborts with the subcommand to resume from when the identity changes or the device
+  stops answering, and issues everything read-only (`sg_raw -R`).
 
 ## 3. Vendor firmware vs the Linux firmware in use
 
@@ -94,7 +102,35 @@ for chip-level defects on this revision. The INF files carry unexplained `OtaKey
 (`da681918c11078801e432552b70bd4a95fad9b6d` for the WiFi driver, `d3ce088cfa29e92ee5b88a4ae0123c72069fc840`
 for the loader) — plausible key material for encrypted OTA blobs, not investigated further.
 
-## 4. Which clones need which treatment
+## 4. The same dongle exposes a second, generic personality
+
+Observed once, on a device that had **finished** the F-sweep and was sitting idle in ZeroCD with no
+command issued in between (the sweep's own log recorded `USB ID state after: ID 1111:1111` at its end):
+
+| | normal personality | fallback personality |
+|---|---|---|
+| VID:PID | `1111:1111` | `214b:2030` (Huasheng Electronics) |
+| strings | `AIC` / `88M80` / serial `12345FLB6J` | `Generic` / `USB2.0 DISK` / **no serial** |
+| SCSI inquiry | `LGX WIFI6 2.30` | `Generic Flash Disk 2.0 2.30` |
+| fake disk | valid FAT12 with `Wifi6_install_bt.exe` | **blank**: first `0x400` bytes zero, then `0xFF` to the end, no FAT, no strings |
+| `F3` | `88M800 DISK\0` | no answer at all |
+| `0xE7` | one byte `0xF8` | one byte `0xF8` (same) |
+| capacity / `bcdDevice` / `MaxPower` | 2 031 616 B / `10.01` / 100 mA | identical |
+
+A power cycle restores the normal personality, with the fake disk's payload byte-identical
+(`Wifi6_install_bt.exe`, 1 919 072 B, sha256 `fea38706…`). What triggers the fallback is **not
+determined** — it is not reproducible by the sweep (the F-range completed on `1111:1111`, and two later
+runs of `0x00`-`0xEF` behaved normally), and it may be a brown-out/power-enumeration artefact.
+
+Two practical consequences:
+- If you see `214b:2030` / `Generic` / `Flash Disk 2.0`, **power-cycle before concluding anything**: the
+  device is not bricked and it is not a different product.
+- **Hash the payload file, not the raw fake-disk image.** The raw hash is *not* stable across power
+  cycles: the payload stays byte-identical while the filesystem metadata region changes (the 1.9 MB
+  image hashed `f9da3829…` on three consecutive captures and a different value after one replug, with
+  the payload still identical; the boot sector's volume serial was `803c0075` on the last capture).
+
+## 5. Which clones need which treatment
 
 The driver source's own `install.sh` drops a udev rule (package-unowned,
 `/usr/lib/udev/rules.d/aic.rules`) that switches `1111:1111` by running
@@ -108,23 +144,24 @@ no vendor CDB at all: `a69c:5721`, `5722` (`aicudisk`), `5723`, `5726`, `5727`, 
 `5724` (`ugreenax900`), `572c` (`cudydiskv2`), `572f`. Worth stating explicitly when documenting which
 device needs which treatment — "it is an AIC8800 ZeroCD clone" does not imply it needs the `F2` CDB.
 
-## 5. Method / limitations (what was *not* touched)
+## 6. Method / limitations (what was *not* touched)
 
 - All probes ran in read-only mode (`sg_raw -R`); nothing was written to the device.
 - No subcommand was probed with a data-OUT phase (writes) on purpose.
-- The sweep covers opcode `0xFD`; other vendor opcodes were not swept, consistent with the published
+- The map covers opcode `0xFD`; other vendor opcodes were not swept, consistent with the published
   static analysis finding only `0xFD` in the DLL.
-- Subcommands `0x00`-`0xEF` of `0xFD` are still pending (the `0xF0`-`0xFF` family is complete).
+- The fallback personality was observed once; its trigger is unknown (see section 4).
 - The firmware comparison covers the Bluetooth half; the WiFi blob is not comparable against this
   installer because the vendor does not ship it in plaintext.
 - Reproducing the static part needs `7z x <installer>.exe` (the closed binaries live inside the NSIS
   self-extractor) and any decompiler — nothing here depends on a specific tool.
 
-## 6. Provenance
+## 7. Provenance
 
 | item | value |
 |---|---|
-| Installer on the fake disk | `Wifi6_install_bt.exe`, 1 919 072 B, sha256 `fea38706153861865b67dae00d9f13227deb923172299d2ae93bf082349d725c` |
-| Raw image of the fake disk | 2 031 616 B (3968 × 512), sha256 `f9da38295ada7763b3e9f9c084558213ded4e39f77bd3108e38b103f78a2724b` |
+| Installer on the fake disk | `Wifi6_install_bt.exe`, 1 919 072 B, sha256 `fea38706153861865b67dae00d9f13227deb923172299d2ae93bf082349d725c` (identical across three power cycles) |
+| Raw fake-disk image | 2 031 616 B (3968 × 512); hash *not* stable across power cycles, see section 4 |
 | `Usb_Driver.dll` analysed here | 109 568 B, sha256 `034fa698512ed5139630d1fd689b620ab52247cbb79c1fd19625833b8d7ba247` |
-| Post-switch IDs observed | `a69c:8d80` (boot ROM) → `a69c:8d81` (WiFi + BT, 3 interfaces) |
+| Fallback-personality raw image | 2 031 616 B, sha256 `5fd5800cac471de1d58d2bc504df54dd968165778a0e94c1b51e7b5c037336cc` |
+| Post-switch IDs observed | `a69c:8d80` (boot ROM) -> `a69c:8d81` (WiFi + BT, 3 interfaces) |
