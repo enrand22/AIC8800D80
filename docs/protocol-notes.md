@@ -165,3 +165,59 @@ device needs which treatment — "it is an AIC8800 ZeroCD clone" does not imply 
 | `Usb_Driver.dll` analysed here | 109 568 B, sha256 `034fa698512ed5139630d1fd689b620ab52247cbb79c1fd19625833b8d7ba247` |
 | Fallback-personality raw image | 2 031 616 B, sha256 `5fd5800cac471de1d58d2bc504df54dd968165778a0e94c1b51e7b5c037336cc` |
 | Post-switch IDs observed | `a69c:8d80` (boot ROM) -> `a69c:8d81` (WiFi + BT, 3 interfaces) |
+
+## 8. Bluetooth audio: the chip, not the host stack (controlled test)
+
+A2DP playback through this dongle produces silence. Because a host-side driver was also in the picture
+(the vendor HCI module, carrying a local SCO/isoc patch), the question had to be settled by holding
+everything else constant and swapping only the driver.
+
+Setup: one headset (Nothing Headphone (1), `3C:B0:ED:A8:3F:20`), one 8 s 440 Hz tone file, sink volume
+80 %, unmuted, targeted **by sink name** (never "the default sink"), played with `paplay --device=<sink>`.
+
+| # | controller | host module | codec | result |
+|---|---|---|---|---|
+| 1 | onboard QCA61x4 (`hci0`, bus 1) | stock `btusb` | LDAC | **audible**; `Missing completion reports` = 0; no kernel errors |
+| 2 | this dongle (`hci1`, `a69c:8d81`) | vendor `aic_btusb` | LDAC | **silent**; `spa.bluez5.sink.media: Missing completion reports for packet (0 suppressed): Bluetooth adapter firmware bug?` x8 at the moment of playback |
+| 3 | this dongle | vendor `aic_btusb` | SBC | **silent**; no host-side complaint |
+| 4 | this dongle | stock `btusb` (injected ID, data-only) | SBC | **silent**; no host-side complaint |
+
+Conclusions:
+
+- **Two unrelated host-side drivers fail identically**, and the one that works is a different *controller*.
+  The failure therefore lives on the device side (chip/firmware/air path), not in the HCI module, not in
+  the host audio stack, and not in the codec negotiation.
+- In the LDAC case the host cannot even complete its USB transfers to the chip ("missing completion
+  reports" is the host's URB to the controller never completing). That failure does not involve the
+  headset at all, which independently points at the chip.
+- The local SCO/isoc patch is **not** the cause: its code only runs inside `if (data->sco_num > 0)` in
+  `btusb_work()`, and for `sco_num == 1` it does exactly what the unmodified upstream code does. It only
+  replaces the branches that used to `return` early when `sco_num >= 2`.
+- What follows the failed A2DP attempt is a downstream cascade, not the trigger: an HFP/SCO attempt
+  fails with `HCI_EV_SYNC_CONN_COMPLETE(0x2c) status:34` (0x22 = **LMP Response Timeout**), the driver
+  configures the isoc interface anyway, and ~5 s later the kernel reports
+  `Bluetooth: hci1: link tx timeout` + `killing stalled connection`, the audio endpoints disappear and
+  the card/sink are gone. **Recovery requires a power cycle**; reconnects then fail until it happens.
+
+Practical consequence: treat this adapter as a **network/data** radio. Its Bluetooth data path (scan,
+LE, pairing, A2DP *negotiation*) works, its audio transport does not.
+
+## 9. Open leads (for whoever picks this up)
+
+1. **Interop or chip?** Every measurement here used one headset. A second brand would separate "the chip's
+   audio path is broken" from "the chip and this headset don't cooperate" — though the LDAC result (host
+   transfers never completing, no headset involved) is already chip-side.
+2. **Power.** The device declares 100 mA in ZeroCD mode (bus powered). A brown-out under audio load would
+   look exactly like this: a chip that stops draining its USB endpoint. Test on a self-powered hub and
+   measure the draw during playback.
+3. **The `OtaKey` values** in the INF files (`d3ce088c…` loader, `da681918…` WiFi) plus the absence of any
+   plaintext `fmacfw` in the Windows package suggest encrypted OTA blobs. Decrypting them would allow a
+   revision-by-revision comparison of the vendor's own firmware.
+4. **Host↔chip split at the wire.** A `usbmon`/`btmon` capture during an SBC playback shows whether the
+   host hands the A2DP ACL packets to the chip and whether the chip's flow control acknowledges them —
+   the missing link between "host sends" and "air transmits".
+5. **The fallback personality** (`214b:2030`, section 4) has an unknown trigger; reproducing it on demand
+   would tell whether blind vendor commands, a power event, or neither is responsible.
+6. **Newer firmware.** The Linux patch table in use is revision 6 against the vendor's revision 3
+   (section 3). If a newer revision is available elsewhere (other packagers, other vendor installers),
+   comparing them is cheap and could confirm or rule out a firmware-side audio defect.
