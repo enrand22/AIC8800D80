@@ -109,6 +109,11 @@ probe() {   # $1 = subcommand in hex (e.g. F3)
   log "USB ID state after: ${despues:-none}"
   if [ "$antes" != "$despues" ]; then
     log "*** USB ID CHANGE with 0x$sub: '$antes' -> '$despues' ***"
+    log "*** an identity change invalidates the rest of the sweep: the device is no longer the"
+    log "*** personality being mapped (seen in the field: 1111:1111 'AIC 88M80' falling back to"
+    log "*** 214b:2030 'Generic Flash Disk 2.0' with a blank fake disk)."
+    log "*** Power-cycle the dongle and resume with:  $0 0x<next sub> $SUB_TO"
+    exit 3
   fi
   if ! vive; then
     log "*** device stopped answering after 0x$sub ***"
