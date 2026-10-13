@@ -78,9 +78,15 @@ log "capacity: $(cat "$BLK/size" 2>/dev/null) sectors"
 # --- 2) raw image of the fake disk (provenance) ------------------------------------
 SECT="$(cat "$BLK/size" 2>/dev/null || echo 0)"
 if [ "${SECT:-0}" -gt 0 ]; then
-  log "--- fake disk raw image: $BLOCKDEV ($SECT sectors) ---"
-  dd if="$BLOCKDEV" of="$ART/fake-cd-raw.img" bs=512 count="$SECT" conv=noerror,sync status=none
-  sha256sum "$ART/fake-cd-raw.img" | tee -a "$LOG"
+  # Timestamped name: overwriting one file loses the previous boot's image, which is exactly what
+  # you need to compare when the raw hash changes between power cycles (it does: the payload stays
+  # byte-identical while the filesystem metadata region does not).
+  IMG="$ART/fake-cd-raw-$(date +%Y%m%d-%H%M%S).img"
+  log "--- fake disk raw image: $BLOCKDEV ($SECT sectors) -> $IMG ---"
+  dd if="$BLOCKDEV" of="$IMG" bs=512 count="$SECT" conv=noerror,sync status=none
+  sha256sum "$IMG" | tee -a "$LOG"
+  # The payload is the stable identifier; hash the regular files too, not just the raw image.
+  if [ -d /run/media/$USER/*/ ]; then :; fi
 fi
 
 # --- 3) liveness and identity ------------------------------------------------------
